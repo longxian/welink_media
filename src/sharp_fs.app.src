@@ -1,0 +1,12 @@
+{application, sharp_fs,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { sharp_fs_app, []}},
+  {env, []}
+ ]}.
