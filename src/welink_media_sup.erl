@@ -1,5 +1,5 @@
 
--module(sharp_fs_sup).
+-module(welink_media_sup).
 
 -behaviour(supervisor).
 

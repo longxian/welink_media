@@ -1,0 +1,241 @@
+= enigmamachine
+
+Enigmamachine is a RESTful web-based video processor which queues and encodes
+videos according to target profiles that you define.  Videos must be on a
+locally mounted filesystem.  The processor takes the path to the video, and
+executes one or more ffmpeg commands on the video.  There is a handy web
+interface for defining encoding tasks, and a restful web service which takes
+encoding commands.
+
+Enigmamachine is written using Sinatra, Thin, and Eventmachine.
+
+== Why would you want one?
+
+If you're not running a server, you probably don't need enigmamachine, because
+there are already lots of great client-side batch processors for all kinds of
+different operating systems. However, if you are running a web application,
+and you want to process uploaded video, enigmamachine offers you a convenient
+fire-and-forget video encoder.
+
+The main problem with encoding video on a server is that it takes a really,
+really long time - you don't want to do it within the scope of a single HTTP
+request, because you want the user's browser to return to their control as
+soon as the upload is finished.  If the video took ten minutes to upload,
+you don't want to keep their browser (and your webapp) busy for a
+further ten minutes while the encoding happens.
+
+The right way to deal with the uploaded video is to fire up a new thread which
+can take over responsibility for encoding the video, while your web app goes
+on its merry way.  Unfortunately, this is difficult in some languages (PHP, for
+example, doesn't have lightweight threading support), and even in languages
+with good threading support it still sort of sucks. With Enigmamachine, all you
+need to do to trigger encoding of a video is shoot off an HTTP request, and
+everything else is handled for you.
+
+
+== Using it
+
+Once you've installed the gem (see below), you can do something like:
+
+ mkdir enigma
+ cd enigma
+ enigmamachine start  # -d to daemonize
+
+Then check it out in your browser, at http://localhost:2002.  This web interface
+exists so that you can configure your enigmamachine easily, and check its status.
+
+Most of the time, though, your enigmamachine will be accessed not through a
+browser, but by your program's code.  Let's say you want your website to be able
+to encode video.  You write the code for the video upload, so your web app can
+receive the video. When the upload is complete, make an HTTP call something like this in your code:
+
+ POST http://localhost:2002/videos
+
+with the params:
+
+ "video[file]=/foo/bar/blah.mp4" # the full path to a file on your local filesystem
+ "video[callback_url]=http://example.org/call/back/id" # an optional callback url
+ "encoder_id=1" # the id of an encoder defined in your enigmamachine database
+
+The enigmamachine will run all encoding tasks on the video, while your web
+application will be free to continue serving requests happily.  If a second video
+is uploaded while the first one is still encoding, it will be placed in a queue.
+Videos are encoded sequentially as they arrive.
+
+All requests, whether they come from your browser or from your code, are
+protected by HTTP basic auth.  By default, the username is
+<i>admin</i> and the password is <i>admin</i>.  You can change the username and
+password in the config.yml file which will be generated on first use.
+
+When a video has finished encoding, the main web application might want to know.
+The optional @video[callback_url]@ parameter tells enigmamachine to execute a GET
+request to the callback url when video encoding is complete.
+
+Programmatic requests in Ruby might look something like this:
+
+# enigma_client.rb:
+
+    require 'rubygems'
+    require 'httparty'
+
+    class EnigmaClient
+
+      include HTTParty
+
+      base_uri "localhost:2002"
+
+      def initialize (u, p)
+        @auth = encode_credentials(u, p)
+      end
+
+      def post(path_to_video, encoder_id, callback_url)
+        self.class.post("/videos", {
+          :body => {:video => {
+            :file => path_to_video,
+            :callback_url => callback_url
+            }, :encoder_id => encoder_id},
+          :basic_auth => @auth})
+      end
+
+      private
+
+      def encode_credentials(username, password)
+        {:username => username, :password => password}
+      end
+
+    end
+
+
+ # Let's use it!
+ #
+ irb
+ require 'enigma_client'
+ EnigmaClient.new("admin", "admin").post("/path/to/your/uploaded/video.mp4", 1, "http://example.org/call/back/id")
+
+
+A simpler, wget-based approach might look like this:
+
+ wget http://admin:admin@localhost:2002/videos --post-data 'video[file]=/path/to/your/video.mp4&video[callback_url]=http://example.org/call/back/id&encoder_id=1'
+
+<b>Don't use wget like this on a shared host, it's insecure</b> (read the wget
+docs for more on this).  This wget example is just to show you what's going on
+when using a simple tool that most programmers know how to use.
+
+== Encoders and Encoding Tasks
+
+When you POST the location of a video to your enigmamachine, you need to tell
+your EM what you want to do to the video.  For example, you might want to take
+an uploaded video and encode it as a 320x240 FLV video, with a 320x240 JPEG
+thumbnail, and a 160x120 miniature thumbnail.
+
+To do this, you'd fire up your enigmamachine by typing
+
+ enigmamachine start
+
+and go to http://localhost:2002/encoders.  Clicking the "new encoder" link will
+allow you to define a new encoder.  Let's call it "Flash video with a couple
+thumbnails", and save it.
+
+So, now there's an encoder, but it won't do anything.  Let's add some tasks,
+by clicking on the "new task" link.
+
+Give the first task a name, like <i>Encode a 320x240 flv at 25 frames per second</i>.
+
+The output file suffix in this case will be *.flv*.
+
+The encoding command you'll want to use would be
+<i>-ab 128 -ar 22050 -b 500000 -r 25 -s 320x240</i>.  This cryptic command string
+tells ffmpeg to encode a Flash video at 320x240 pixels, with an audio bitrate
+of 128kbps, an audio sample rate of 22.050khz, and a frame rate of 25fps. You
+can find out what all the ffmpeg command line switches do by RTFMing at
+http://www.ffmpeg.org/ffmpeg-doc.html
+
+You would go on to define a couple more encoding tasks for your encoder.
+Grabbing a screen frame in ffmpeg can be done with the following command-line
+switches, which you can put into a task called, let's say,
+<i>Grab a 320x240 JPEG thumbnail</i>:
+
+ -ss 00:00:05 -t 00:00:01 -vcodec mjpeg -vframes 1 -an -f rawvideo -s 320x240
+
+Rinse and repeat for the 160x120 thumbnail.
+
+== Security considerations
+
+Enigmamachine is set to bind by default to 127.0.0.1 (your system's loopback)
+interface rather than on all network interfaces, so it won't be accessible from
+other machines.
+
+Making an enigmamachine available on an untrusted network (like
+the Internet) would be a suicidal move on your part, since the code used to
+talk to ffmpeg is a simple backtick exec call and you'll be inviting everyone in
+the world to execute commands on your server, with your effective user
+permissions.
+
+When the enigmamachine starts for the first time in a given directory, it will
+spit out a config.yml file containing a username and password.  All requests
+will need to submit this auth information.  This should make enigmamachine
+reasonably safe to use on shared hosts, just make sure nobody can read the
+config file except the user executing the enigmamachine process.
+
+If you don't know what any of this means, don't run it.  I'm not responsible if
+your enigmamachine screws up your system, allows people to exploit you, or
+eats your mother.
+
+== Installation
+
+Enigmamachine is written in Ruby and uses the Sinatra web framework, the
+Datamapper ORM library, the Eventmachine event-processing library, and the Thin
+webserver.  If you're not a Ruby person, you don't need to care about any of this.
+Enigmamachine can be triggered by any language that can send a POST request -
+so all you PHPistas, python-lovers, droopy-moustachists, or blue-suited
+java types can all use it just as easy as us fashionable-haircut-language
+people.
+
+You can install it as a gem by doing:
+
+ gem install enigmamachine
+
+If this command doesn't make any sense to you, it's because you don't know that
+"gems" are ruby code packages, somewhat like apt-get except for ruby code only.
+You can install rubygems, necessary sqlite headers, and a C compiler on
+righteous operating systems by typing:
+
+ apt-get install rubygems ruby1.8-dev libopenssl-ruby build-essential libsqlite3-dev ffmpeg # as root
+
+You'll need to add the following line to your ~/.bashrc file, as well:
+
+ export PATH=/var/lib/gems/1.8/bin:$PATH
+
+Then <i>gem install enigmamachine</i> should theoretically work.  You'll also need a copy of
+ffmpeg installed and available in your path. On Mac OS X, rubygems should
+already be installed, although you'll need to have a C compiler available
+(make sure you install the developer tools that came with your operating
+system).
+
+== Status
+
+Enigmamachine should be considered beta quality code.  At the same time,
+crashes and bugs have been infrequent for us, and it's a simple system which
+is working well.  Please let us know of any bugs by filing an issue on the
+GitHub tracker.
+
+
+== Note on Patches/Pull Requests
+
+* Fork the project.
+* Make your feature addition or bug fix.
+* Add tests for it. This is important so I don't break it in a
+  future version unintentionally.
+* Commit, do not mess with rakefile, version, or history. (if you want to have your own version, that is fine but bump version in a commit by itself I can ignore when I pull)
+* Send me a pull request. Bonus points for topic branches.
+
+== Copyright
+
+Copyright (c) 2010 Dave Hrycyszyn. See LICENSE for details.
+
+Enigmamachine is a headlabs project.  See http://labs.headlondon.com for more.
+
+== Contributors
+
+Dave Hrycyszyn, Dmitry Brazhkin
+
